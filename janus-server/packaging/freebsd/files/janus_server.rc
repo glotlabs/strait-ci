@@ -20,8 +20,9 @@ pid_dir="${janus_server_prefix}/run"
 pidfile="${pid_dir}/janus_server.pid"
 logfile="${janus_server_prefix}/log/janus_server.log"
 
+procname="${janus_server_prefix}/bin/janus-server"
 command="/usr/sbin/daemon"
-command_args="-u ${janus_server_user} -p ${pidfile} -o ${logfile} env PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:${janus_server_prefix}/bin ${janus_server_prefix}/bin/janus-server serve --config ${janus_server_config}"
+command_args="-p ${pidfile} -o ${logfile} env PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:${janus_server_prefix}/bin ${janus_server_prefix}/bin/janus-server serve --config ${janus_server_config}"
 
 start_precmd="janus_server_precmd"
 
@@ -34,4 +35,5 @@ janus_server_precmd()
     chmod 0640 "${logfile}"
 }
 
+umask 002
 run_rc_command "$1"

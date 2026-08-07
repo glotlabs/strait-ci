@@ -20,6 +20,7 @@ pid_dir="${janus_runner_prefix}/run"
 pidfile="${pid_dir}/janus_runner.pid"
 logfile="${janus_runner_prefix}/log/janus_runner.log"
 
+procname="${janus_runner_prefix}/bin/janus-runner"
 command="/usr/sbin/daemon"
 command_args="-p ${pidfile} -o ${logfile} env RUST_LOG=${janus_runner_rust_log} PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:${janus_runner_prefix}/bin ${janus_runner_prefix}/bin/janus-runner ${janus_runner_config}"
 
