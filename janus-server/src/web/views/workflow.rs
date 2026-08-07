@@ -11,6 +11,21 @@ pub(crate) struct WorkflowCard {
     pub schema_report: WorkflowSchemaReport,
     pub trigger: WorkflowTrigger,
     pub job_count: usize,
+    pub manual_artifacts: Vec<ManualArtifactField>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ManualArtifactField {
+    pub field_name: String,
+    pub label: String,
+    pub source_label: String,
+    pub options: Vec<ManualArtifactOption>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ManualArtifactOption {
+    pub value: String,
+    pub label: String,
 }
 
 pub(crate) struct WorkflowFormView {
@@ -81,6 +96,7 @@ pub(crate) fn workflows_page(
                                     &format!("/workflows/{}/run", card.workflow.id),
                                     csrf,
                                     manual_default_branch(&card.trigger, &card.repo),
+                                    &card.manual_artifacts,
                                 ))
                             }
                             (schema_diff_summary(&card.schema_report.diff))
@@ -98,6 +114,7 @@ pub(crate) fn workflow_detail_page(
     schema_report: WorkflowSchemaReport,
     form: WorkflowFormView,
     csrf: &str,
+    manual_artifacts: Vec<ManualArtifactField>,
 ) -> Markup {
     let is_manual = form.trigger_kind == "manual";
     let default_branch = if form.branch_name.trim().is_empty() {
@@ -141,6 +158,7 @@ pub(crate) fn workflow_detail_page(
                         &format!("/workflows/{}/run", workflow.id),
                         csrf,
                         default_branch,
+                        &manual_artifacts,
                     ))
                 }
             }
@@ -373,7 +391,13 @@ fn manual_default_branch(trigger: &WorkflowTrigger, repo: &Repo) -> String {
         .unwrap_or_else(|| repo.default_branch.clone())
 }
 
-fn manual_run_form(action: &str, csrf: &str, default_branch: String) -> Markup {
+fn manual_run_form(
+    action: &str,
+    csrf: &str,
+    default_branch: String,
+    artifact_fields: &[ManualArtifactField],
+) -> Markup {
+    let unavailable = artifact_fields.iter().any(|field| field.options.is_empty());
     html! {
         form method="post" action=(action) class="stack-md inset-panel" {
             (csrf_input(csrf))
@@ -387,8 +411,26 @@ fn manual_run_form(action: &str, csrf: &str, default_branch: String) -> Markup {
                     input name="commit" value="HEAD";
                 }
             }
+            @for field in artifact_fields {
+                label {
+                    span { (field.label) }
+                    select name=(field.field_name) required {
+                        option value="" selected disabled { "Select an artifact" }
+                        @for option in &field.options {
+                            option value=(option.value) { (option.label) }
+                        }
+                    }
+                    small class="muted" {
+                        @if field.options.is_empty() {
+                            "No successful artifacts are available from " (field.source_label) "."
+                        } @else {
+                            "Showing the 10 newest successful artifacts from " (field.source_label) "."
+                        }
+                    }
+                }
+            }
             div class="actions" {
-                button type="submit" { "Run workflow" }
+                button type="submit" disabled[unavailable] { "Run workflow" }
             }
         }
     }

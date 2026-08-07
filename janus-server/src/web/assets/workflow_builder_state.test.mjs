@@ -7,6 +7,7 @@ import {
   OutcomePolicy,
   inferBinding,
   outputOptionsFor,
+  promotedArtifactSourceOptions,
   readInputBinding,
   serializeJobs,
   validateJobs,
@@ -115,9 +116,44 @@ test('inferBinding maps manifest defaults and saved bindings', () => {
     mode: 'output_value',
     value: '{"kind":"job_output","job_index":0,"output_name":"version"}'
   });
+  const promoted = {
+    kind: 'promoted_artifact',
+    source_runner_id: 'runner-1',
+    source_job_name: 'build',
+    output_name: 'app'
+  };
+  assert.deepEqual(inferBinding('app', 'artifact', promoted), {
+    mode: 'promoted_artifact',
+    value: JSON.stringify(promoted)
+  });
+});
+
+test('promotedArtifactSourceOptions exposes advertised artifact outputs', () => {
+  assert.deepEqual(promotedArtifactSourceOptions(catalog), [{
+    value: JSON.stringify({
+      kind: 'promoted_artifact',
+      source_runner_id: 'runner-1',
+      source_job_name: 'build',
+      output_name: 'app'
+    }),
+    label: 'Linux / build / app'
+  }]);
 });
 
 test('readInputBinding parses literal and special binding modes from fake rows', () => {
+  const promoted = {
+    kind: 'promoted_artifact',
+    source_runner_id: 'runner-1',
+    source_job_name: 'build',
+    output_name: 'app'
+  };
+  assert.deepEqual(readInputBinding(inputRow({
+    name: 'app',
+    kind: 'artifact',
+    mode: 'promoted_artifact',
+    value: JSON.stringify(promoted)
+  })), ['app', promoted]);
+
   assert.deepEqual(readInputBinding(inputRow({
     name: 'count',
     kind: 'integer',

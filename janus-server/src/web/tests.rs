@@ -4,8 +4,8 @@ use crate::{
     auth::{hash_password, session_cookie},
     git,
     models::{
-        Repo, RunnerJobDefinition, User, UserRole, WorkflowDefinition, WorkflowInputBinding,
-        WorkflowJobDefinition, WorkflowJobOutcomePolicy, WorkflowTrigger,
+        JobRunOutput, Repo, RunnerJobDefinition, User, UserRole, WorkflowDefinition,
+        WorkflowInputBinding, WorkflowJobDefinition, WorkflowJobOutcomePolicy, WorkflowTrigger,
     },
     scheduler,
 };
@@ -17,7 +17,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{Duration, Utc};
-use janus_lib::{HEADER_IDEMPOTENCY_KEY, RunnerRouteTemplate};
+use janus_lib::{HEADER_IDEMPOTENCY_KEY, JobOutputMetadata, RunnerRouteTemplate};
 use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -339,6 +339,218 @@ async fn manual_workflow_can_be_run_from_frontend() {
     assert_eq!(pipeline.trigger_type, "manual");
     assert_eq!(pipeline.trigger_ref.as_deref(), Some("release"));
     assert_eq!(pipeline.commit_sha.as_deref(), Some("abc123"));
+}
+
+#[tokio::test]
+async fn manual_workflow_promotes_a_recent_build_artifact_to_another_runner() {
+    let mock = spawn_mock_runner().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+    fixture
+        .state
+        .db
+        .update_runner_name(&fixture.runner_id, "glot-build")
+        .expect("build runner name");
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "artifact-promotion");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    let build_workflow = fixture
+        .state
+        .db
+        .workflows_for_repo(&repo.id)
+        .expect("workflows")
+        .into_iter()
+        .find(|workflow| workflow.name == "wf")
+        .expect("build workflow");
+    let build_pipeline_id = scheduler::enqueue_workflow_run(
+        Arc::clone(&fixture.state),
+        &build_workflow,
+        "push",
+        Some("refs/heads/main"),
+        Some("abc123def456"),
+    )
+    .expect("build pipeline");
+    let build_job_id = fixture
+        .state
+        .db
+        .pipeline_snapshot(&build_pipeline_id)
+        .expect("snapshot")
+        .expect("pipeline")
+        .jobs[0]
+        .run
+        .id
+        .clone();
+    let bytes = b"immutable-release-bits";
+    let pending = fixture
+        .state
+        .artifacts
+        .store_bytes("job_output", &build_job_id, "app", bytes)
+        .expect("store build artifact");
+    let server_artifact_id = fixture
+        .state
+        .db
+        .insert_server_artifact(&pending)
+        .expect("artifact row");
+    fixture
+        .state
+        .db
+        .finish_job_run(
+            &build_job_id,
+            "success",
+            Some(10),
+            Some(0),
+            None,
+            None,
+            &JobOutputMetadata::default(),
+            "",
+            "",
+            &[JobRunOutput {
+                output_name: "app".to_string(),
+                kind: "artifact".to_string(),
+                runner_artifact_id: Some("build-runner-artifact".to_string()),
+                server_artifact_id: Some(server_artifact_id.clone()),
+                value: None,
+                sha256: Some(pending.sha256.clone()),
+                size_bytes: Some(bytes.len() as i64),
+            }],
+        )
+        .expect("finish build");
+    fixture
+        .state
+        .db
+        .finalize_pipeline_status(&build_pipeline_id)
+        .expect("finish pipeline");
+
+    let prod_runner_id = fixture
+        .state
+        .db
+        .create_runner("glot-prod", &mock.base_url)
+        .expect("prod runner");
+    fixture
+        .state
+        .db
+        .replace_runner_jobs(
+            &prod_runner_id,
+            &[runner_job_definition(
+                r#"{"name":"deploy-app","timeout_seconds":60,"inputs":{"app":{"type":"artifact","required":true}},"outputs":{}}"#,
+            )],
+        )
+        .expect("prod jobs");
+    let prod_jobs = vec![WorkflowJobDefinition {
+        runner_id: prod_runner_id,
+        runner_job_name: "deploy-app".to_string(),
+        inputs: BTreeMap::from([(
+            "app".to_string(),
+            WorkflowInputBinding::PromotedArtifact {
+                source_runner_id: fixture.runner_id.clone(),
+                source_job_name: "build-app".to_string(),
+                output_name: "app".to_string(),
+            },
+        )]),
+        outcome_policy: WorkflowJobOutcomePolicy::Required,
+    }];
+    let prod_workflow_id = fixture
+        .state
+        .db
+        .create_workflow(
+            &repo.id,
+            "deploy-prod",
+            true,
+            &serde_json::to_string(&WorkflowTrigger {
+                kind: "manual".to_string(),
+                branches: vec!["main".to_string()],
+            })
+            .expect("trigger"),
+            &serde_json::to_string(&WorkflowDefinition {
+                jobs: prod_jobs.clone(),
+            })
+            .expect("definition"),
+            &workflow_job_schemas(&fixture.state, &prod_jobs),
+        )
+        .expect("prod workflow");
+
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get(format!("/workflows/{prod_workflow_id}"))
+                .header("cookie", cookie.clone())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body")
+            .to_vec(),
+    )
+    .expect("html");
+    assert!(html.contains(&server_artifact_id));
+    assert!(html.contains("glot-build / build-app / app"));
+    assert!(html.contains("abc123def456"));
+
+    let token = csrf_token(&fixture.state, &fixture.user);
+    let invalid_body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf_token", &token)
+        .append_pair("artifact:0:app", "srvart_not_eligible")
+        .finish();
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post(format!("/workflows/{prod_workflow_id}/run"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", cookie.clone())
+                .body(Body::from(invalid_body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf_token", &token)
+        .append_pair("branch", "main")
+        .append_pair("commit", "abc123def456")
+        .append_pair("artifact:0:app", &server_artifact_id)
+        .finish();
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post(format!("/workflows/{prod_workflow_id}/run"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", cookie)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let prod_pipeline = fixture
+        .state
+        .db
+        .list_pipeline_runs()
+        .expect("pipelines")
+        .into_iter()
+        .find(|pipeline| pipeline.workflow_id == prod_workflow_id)
+        .expect("prod pipeline");
+    let selections = fixture
+        .state
+        .db
+        .workflow_run_artifact_selections(&prod_pipeline.id)
+        .expect("selections");
+    assert_eq!(selections.len(), 1);
+    assert_eq!(selections[0].server_artifact_id, server_artifact_id);
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("dispatch production deploy");
+    let requests = mock.requests_for("deploy-app");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["app"], json!("artifact-1"));
 }
 
 #[tokio::test]

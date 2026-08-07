@@ -18,7 +18,7 @@ use crate::{
     git,
     models::{
         JobRun, RunnerJobDefinition, Workflow, WorkflowDefinition, WorkflowInputBinding,
-        WorkflowTrigger,
+        WorkflowRunArtifactSelection, WorkflowTrigger,
     },
     runner::{JobLogsResponse, JobOutputMetadata},
     schema_diff::{WorkflowSchemaStatus, workflow_schema_report},
@@ -123,6 +123,17 @@ pub(crate) fn enqueue_workflow_run(
     trigger_ref: Option<&str>,
     commit_sha: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    enqueue_workflow_run_with_artifacts(state, workflow, trigger_type, trigger_ref, commit_sha, &[])
+}
+
+pub(crate) fn enqueue_workflow_run_with_artifacts(
+    state: Arc<AppState>,
+    workflow: &Workflow,
+    trigger_type: &str,
+    trigger_ref: Option<&str>,
+    commit_sha: Option<&str>,
+    artifact_selections: &[WorkflowRunArtifactSelection],
+) -> Result<String, Box<dyn std::error::Error>> {
     match workflow_schema_report(&state, workflow)?.status {
         WorkflowSchemaStatus::Current => {}
         WorkflowSchemaStatus::Stale => {
@@ -151,6 +162,9 @@ pub(crate) fn enqueue_workflow_run(
         trigger_ref,
         commit_sha,
     )?;
+    state
+        .db
+        .add_workflow_run_artifact_selections(&pipeline_id, artifact_selections)?;
     let mut previous_run_id: Option<String> = None;
     for (job_index, job) in definition.jobs.iter().enumerate() {
         let run_id = state.db.create_job_run(
@@ -316,6 +330,7 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
             Arc::clone(&state),
             &pipeline,
             &job.id,
+            job.job_index as usize,
             job_definition,
             runner_job_definition,
         )
@@ -658,6 +673,7 @@ async fn resolve_job_inputs(
     state: Arc<AppState>,
     pipeline: &crate::models::PipelineRun,
     job_run_id: &str,
+    job_index: usize,
     job_definition: &crate::models::WorkflowJobDefinition,
     runner_job_definition: &RunnerJobDefinition,
 ) -> Result<Map<String, Value>, Box<dyn std::error::Error>> {
@@ -685,6 +701,35 @@ async fn resolve_job_inputs(
                     ensure_source_artifact(Arc::clone(&state), pipeline, &job_definition.runner_id)
                         .await?;
                 resolved.insert(key.clone(), json!(artifact_id));
+            }
+            WorkflowInputBinding::PromotedArtifact { .. } => {
+                let server_artifact_id = state
+                    .db
+                    .workflow_run_artifact_selection(&pipeline.id, job_index, key)?
+                    .ok_or_else(|| {
+                        format!(
+                            "missing promoted artifact selection for job-{}.{}",
+                            job_index + 1,
+                            key
+                        )
+                    })?;
+                let artifact = state
+                    .db
+                    .get_server_artifact_by_id(&server_artifact_id)?
+                    .ok_or_else(|| {
+                        format!("missing selected server artifact {server_artifact_id}")
+                    })?;
+                let bytes = state.artifacts.read_bytes(&artifact)?;
+                let target_runner = state
+                    .db
+                    .get_runner(&job_definition.runner_id)?
+                    .ok_or_else(|| format!("missing runner {}", job_definition.runner_id))?;
+                let upload = state
+                    .runner_client
+                    .upload_artifact(&target_runner, bytes, &artifact.sha256)
+                    .await
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                resolved.insert(key.clone(), json!(upload.artifact_id));
             }
             WorkflowInputBinding::JobOutput {
                 job_index,

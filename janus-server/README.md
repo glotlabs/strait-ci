@@ -50,15 +50,12 @@ Workflow JSON shape:
 {
   "jobs": [
     {
-      "id": "build",
-      "name": "Build",
       "runner_id": "runner-uuid",
       "runner_job_name": "build-app",
-      "needs": [],
       "inputs": {
-        "commit": "$commit",
-        "branch": "$branch",
-        "source": "$source"
+        "commit": { "kind": "commit" },
+        "branch": { "kind": "branch" },
+        "source": { "kind": "source_artifact" }
       },
       "outcome_policy": "required"
     }
@@ -68,7 +65,26 @@ Workflow JSON shape:
 
 Supported input bindings:
 
-- `$commit`
-- `$branch`
-- `$source`
-- `$job.<job_id>.<artifact_name>`
+- `commit` and `branch` values from the pipeline trigger
+- a generated source archive
+- an artifact or typed value output from an earlier job in the same pipeline
+- a promoted artifact selected when a manual workflow is started
+
+## Artifact promotion
+
+A manual deployment workflow can consume an immutable artifact produced by a
+different, successful pipeline in the same repository. In the workflow editor,
+set the deployment job's artifact input to **Artifact selected at run time** and
+choose the source runner, job, and output (for example,
+`glot-build / build-app / app`).
+
+The manual Run form lists the ten newest matching artifacts. Each option shows
+its commit, source workflow, creation time, size, and digest. Janus validates the
+selection server-side, records it with the new pipeline, and uploads the
+server-mirrored bytes to the deployment runner. Production reruns retain the
+exact original artifact selection rather than resolving the newest artifact
+again.
+
+Only artifacts from successful jobs in successful pipelines for the same
+repository are eligible. Runtime-selected artifact bindings are accepted only
+on manual workflows.

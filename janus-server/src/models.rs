@@ -241,10 +241,39 @@ pub enum WorkflowInputBinding {
     Commit,
     Branch,
     SourceArtifact,
+    PromotedArtifact {
+        source_runner_id: String,
+        source_job_name: String,
+        output_name: String,
+    },
     JobOutput {
         job_index: usize,
         output_name: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowRunArtifactSelection {
+    pub job_index: usize,
+    pub input_name: String,
+    pub server_artifact_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotableArtifact {
+    pub server_artifact_id: String,
+    pub sha256: String,
+    pub size_bytes: i64,
+    pub created_at: String,
+    pub pipeline_run_id: String,
+    pub workflow_name: String,
+    pub job_run_id: String,
+    pub runner_id: String,
+    pub runner_name: String,
+    pub runner_job_name: String,
+    pub output_name: String,
+    pub commit_sha: Option<String>,
+    pub trigger_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,6 +303,7 @@ pub fn parse_job_output_binding(value: &WorkflowInputBinding) -> Option<JobOutpu
 pub struct PipelineSnapshot {
     pub pipeline: PipelineRun,
     pub jobs: Vec<JobRunDetail>,
+    pub artifact_selections: Vec<WorkflowRunArtifactSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

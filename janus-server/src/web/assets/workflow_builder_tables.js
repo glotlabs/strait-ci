@@ -12,12 +12,14 @@ import {
   inferBinding,
   literalHintFor,
   outputOptionsFor,
+  promotedArtifactSourceOptions,
 } from './workflow_builder_state.js';
 
 export function renderInputTable({
   row,
   derivedJobs,
   getJobDefinition,
+  catalog,
   templates,
   onBindingChanged,
 }) {
@@ -44,6 +46,7 @@ export function renderInputTable({
       input,
       derivedJobs,
       getJobDefinition,
+      catalog,
       onBindingChanged,
     }));
   }
@@ -82,6 +85,7 @@ function renderInputRow({
   input,
   derivedJobs,
   getJobDefinition,
+  catalog = [],
   onBindingChanged,
 }) {
   const { inputName, inputDef } = input;
@@ -113,7 +117,12 @@ function renderInputRow({
       mode: modeSelect.value,
       value: inputRow.dataset.bindingValue || binding.value || ''
     };
-    const field = buildValueField(inputDef.type, currentBinding, inputRow);
+    const field = buildValueField(
+      inputDef.type,
+      currentBinding,
+      inputRow,
+      promotedArtifactSourceOptions(catalog || [])
+    );
     if (isOutputBinding && outputOptionsFor(row, derivedJobs, expectedOutputKind, getJobDefinition).length === 0) {
       field.hidden = true;
     }
@@ -136,7 +145,10 @@ function renderInputRow({
         mode: modeSelect.value,
         derivedJobs,
         getJobDefinition
-      });
+      })
+      || (modeSelect.value === 'promoted_artifact'
+        ? 'Choose the build output; the operator selects one of its 10 newest successful artifacts when starting this workflow.'
+        : '');
     if (hint) {
       const note = document.createElement('div');
       note.className = 'muted';

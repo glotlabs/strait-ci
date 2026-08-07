@@ -52,6 +52,9 @@ export function buildDerivedJobs(rows, getRunner) {
 export function inferBinding(inputName, kind, rawValue) {
   if (kind === 'artifact') {
     if (rawValue && rawValue.kind === 'source_artifact') return { mode: 'source_artifact', value: 'source.tar.gz' };
+    if (rawValue && rawValue.kind === 'promoted_artifact') {
+      return { mode: 'promoted_artifact', value: JSON.stringify(rawValue) };
+    }
     if (rawValue && typeof rawValue === 'object' && rawValue.kind === 'job_output') {
       return { mode: 'output_artifact', value: JSON.stringify(rawValue) };
     }
@@ -88,6 +91,11 @@ export function readInputBinding(inputRow) {
   const mode = modeSelect ? modeSelect.value : 'literal';
   if (kind === 'artifact') {
     if (mode === 'source_artifact') return [name, { kind: 'source_artifact' }];
+    if (mode === 'promoted_artifact') {
+      return [name, parseOutputBinding(valueField ? valueField.value : '') || {
+        kind: 'promoted_artifact', source_runner_id: '', source_job_name: '', output_name: ''
+      }];
+    }
     return [name, parseOutputBinding(valueField ? valueField.value : '') || { kind: 'source_artifact' }];
   }
   if (kind === 'string') {
@@ -185,6 +193,9 @@ function bindingIsMissing(binding) {
   if (binding.kind === 'job_output') {
     return binding.output_name === '';
   }
+  if (binding.kind === 'promoted_artifact') {
+    return !binding.source_runner_id || !binding.source_job_name || !binding.output_name;
+  }
   return false;
 }
 
@@ -238,7 +249,8 @@ export function literalHintFor(kind, mode) {
 export function bindingModesFor(kind) {
   if (kind === 'artifact') return [
     ['source_artifact', 'Source archive'],
-    ['output_artifact', 'Output artifact']
+    ['output_artifact', 'Earlier job output'],
+    ['promoted_artifact', 'Artifact selected at run time']
   ];
   if (kind === 'string') return [
     ['literal', 'Literal'],
@@ -251,4 +263,25 @@ export function bindingModesFor(kind) {
     ['output_value', 'Job output']
   ];
   return [['literal', 'Literal']];
+}
+
+export function promotedArtifactSourceOptions(catalog) {
+  const options = [];
+  for (const runner of catalog) {
+    for (const job of runner.jobs || []) {
+      for (const [outputName, output] of Object.entries(job.outputs || {})) {
+        if (output.type !== 'artifact') continue;
+        options.push({
+          value: JSON.stringify({
+            kind: 'promoted_artifact',
+            source_runner_id: runner.id,
+            source_job_name: job.name,
+            output_name: outputName,
+          }),
+          label: `${runner.name} / ${job.name} / ${outputName}`,
+        });
+      }
+    }
+  }
+  return options;
 }

@@ -54,20 +54,26 @@ export function renderOutputBindingOptions({ derivedJobs, getJobDefinition }) {
   }
 }
 
-export function buildValueField(kind, binding, row) {
-  const field = valueFieldFor(kind, binding);
+export function buildValueField(kind, binding, row, promotedArtifactOptions = []) {
+  const field = valueFieldFor(kind, binding, promotedArtifactOptions);
   if (field.bindingValue !== undefined) {
     row.dataset.bindingValue = field.bindingValue;
   }
   return field.element;
 }
 
-function valueFieldFor(kind, binding) {
+function valueFieldFor(kind, binding, promotedArtifactOptions) {
   if (kind === 'artifact') {
     const select = makeSelect();
     select.setAttribute('data-binding-value', 'true');
     if (binding.mode === 'source_artifact') {
       replaceOptions(select, [{ value: 'source.tar.gz', label: 'source.tar.gz' }], 'source.tar.gz');
+    } else if (binding.mode === 'promoted_artifact') {
+      replaceOptions(select, promotedArtifactOptions, binding.value || '', {
+        placeholder: promotedArtifactOptions.length === 0
+          ? { label: 'No artifact outputs advertised' }
+          : { label: 'Choose build artifact source' },
+      });
     }
     return { element: select, bindingValue: binding.value || '' };
   }

@@ -12,8 +12,9 @@ use uuid::Uuid;
 use crate::models::AuditEvent;
 use crate::models::{
     JobRun, JobRunDetail, JobRunOutput, PipelineRun, PipelineSnapshot, PreviousJobSummary,
-    PushEvent, PushEventRef, Repo, Runner, RunnerJobDefinition, RunnerJobInputDefinition,
-    RunnerJobOutputDefinition, ServerArtifact, User, UserRole, Workflow, WorkflowJobOutcomePolicy,
+    PromotableArtifact, PushEvent, PushEventRef, Repo, Runner, RunnerJobDefinition,
+    RunnerJobInputDefinition, RunnerJobOutputDefinition, ServerArtifact, User, UserRole, Workflow,
+    WorkflowJobOutcomePolicy, WorkflowRunArtifactSelection,
 };
 use crate::state_machine::{self, JobStatus};
 use janus_lib::{Concurrency, InputType, JobOutputMetadata, OutputType};
@@ -23,10 +24,16 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: include_str!("migrations/0001_init.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: include_str!("migrations/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("migrations/0002_workflow_run_artifact_inputs.sql"),
+    },
+];
 
 #[derive(Clone)]
 pub struct Database {
@@ -736,6 +743,70 @@ impl Database {
         Ok(id)
     }
 
+    pub fn add_workflow_run_artifact_selections(
+        &self,
+        pipeline_run_id: &str,
+        selections: &[WorkflowRunArtifactSelection],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut conn = self.conn.lock().expect("db mutex poisoned");
+        let tx = conn.transaction()?;
+        for selection in selections {
+            tx.execute(
+                "INSERT INTO workflow_run_artifact_inputs
+                 (pipeline_run_id, job_index, input_name, server_artifact_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    pipeline_run_id,
+                    selection.job_index as i64,
+                    selection.input_name,
+                    selection.server_artifact_id,
+                    now()
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn workflow_run_artifact_selections(
+        &self,
+        pipeline_run_id: &str,
+    ) -> Result<Vec<WorkflowRunArtifactSelection>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT job_index, input_name, server_artifact_id
+             FROM workflow_run_artifact_inputs
+             WHERE pipeline_run_id = ?1
+             ORDER BY job_index, input_name",
+        )?;
+        let rows = stmt.query_map([pipeline_run_id], |row| {
+            Ok(WorkflowRunArtifactSelection {
+                job_index: row.get::<_, i64>(0)? as usize,
+                input_name: row.get(1)?,
+                server_artifact_id: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn workflow_run_artifact_selection(
+        &self,
+        pipeline_run_id: &str,
+        job_index: usize,
+        input_name: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT server_artifact_id
+                 FROM workflow_run_artifact_inputs
+                 WHERE pipeline_run_id = ?1 AND job_index = ?2 AND input_name = ?3",
+                params![pipeline_run_id, job_index as i64, input_name],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn create_job_run(
         &self,
         pipeline_run_id: &str,
@@ -952,7 +1023,26 @@ impl Database {
                 resolved_inputs,
             });
         }
-        Ok(Some(PipelineSnapshot { pipeline, jobs }))
+        let mut selection_stmt = conn.prepare(
+            "SELECT job_index, input_name, server_artifact_id
+             FROM workflow_run_artifact_inputs
+             WHERE pipeline_run_id = ?1
+             ORDER BY job_index, input_name",
+        )?;
+        let artifact_selections = selection_stmt
+            .query_map([pipeline_id], |row| {
+                Ok(WorkflowRunArtifactSelection {
+                    job_index: row.get::<_, i64>(0)? as usize,
+                    input_name: row.get(1)?,
+                    server_artifact_id: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(PipelineSnapshot {
+            pipeline,
+            jobs,
+            artifact_selections,
+        }))
     }
 
     pub fn list_job_runs_by_status(
@@ -1616,6 +1706,66 @@ impl Database {
                 })
             },
         ).optional()?)
+    }
+
+    pub fn list_recent_promotable_artifacts(
+        &self,
+        repo_id: &str,
+        source_runner_id: &str,
+        source_job_name: &str,
+        output_name: &str,
+        limit: usize,
+    ) -> Result<Vec<PromotableArtifact>, Box<dyn std::error::Error>> {
+        let limit = i64::try_from(limit.min(100))?;
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT sa.id, sa.sha256, sa.size_bytes, sa.created_at,
+                    p.id, w.name, jr.id, jr.runner_id, r.name,
+                    jr.runner_job_name, jra.artifact_name, p.commit_sha, p.trigger_ref
+             FROM job_run_artifacts jra
+             JOIN server_artifacts sa ON sa.id = jra.server_artifact_id
+             JOIN job_runs jr ON jr.id = jra.job_run_id
+             JOIN pipeline_runs p ON p.id = jr.pipeline_run_id
+             JOIN workflows w ON w.id = p.workflow_id
+             JOIN runners r ON r.id = jr.runner_id
+             WHERE p.repo_id = ?1
+               AND p.status = 'success'
+               AND jr.status = 'success'
+               AND jr.runner_id = ?2
+               AND jr.runner_job_name = ?3
+               AND jra.artifact_name = ?4
+               AND jra.artifact_role = 'output'
+               AND jra.output_type = 'artifact'
+             ORDER BY p.finished_at DESC, jr.finished_at DESC, sa.id DESC
+             LIMIT ?5",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                repo_id,
+                source_runner_id,
+                source_job_name,
+                output_name,
+                limit
+            ],
+            |row| {
+                Ok(PromotableArtifact {
+                    server_artifact_id: row.get(0)?,
+                    sha256: row.get(1)?,
+                    size_bytes: row.get(2)?,
+                    created_at: row.get(3)?,
+                    pipeline_run_id: row.get(4)?,
+                    workflow_name: row.get(5)?,
+                    job_run_id: row.get(6)?,
+                    runner_id: row.get(7)?,
+                    runner_name: row.get(8)?,
+                    runner_job_name: row.get(9)?,
+                    output_name: row.get(10)?,
+                    commit_sha: row.get(11)?,
+                    trigger_ref: row.get(12)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 

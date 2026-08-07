@@ -70,6 +70,19 @@ pub(crate) fn pipeline_detail_page(
                     div class="meta-pair" { span { "Cancel requested" } strong { (snapshot.pipeline.cancel_requested_at.clone().unwrap_or_default()) } }
                     div class="meta-pair" { span { "Cancel started" } strong { (snapshot.pipeline.cancel_started_at.clone().unwrap_or_default()) } }
                 }
+                @if !snapshot.artifact_selections.is_empty() {
+                    div class="stack-md" {
+                        span class="subsection-title" { "Promoted artifacts" }
+                        @for selection in &snapshot.artifact_selections {
+                            div class="list-row" {
+                                strong { "job-" (selection.job_index + 1) "." (selection.input_name) }
+                                a href=(format!("/artifacts/{}", selection.server_artifact_id)) {
+                                    (selection.server_artifact_id)
+                                }
+                            }
+                        }
+                    }
+                }
                 div class="actions" {
                     form method="post" action=(format!("/pipelines/{}/rerun", snapshot.pipeline.id)) {
                         (csrf_input(csrf))

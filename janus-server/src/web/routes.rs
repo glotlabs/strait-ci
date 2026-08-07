@@ -58,7 +58,8 @@ use crate::{
     models::{
         self, PipelineRun, Repo, RunnerJobDefinition, RunnerJobInputDefinition, User, UserRole,
         Workflow, WorkflowDefinition, WorkflowInputBinding, WorkflowJobDefinition,
-        WorkflowJobOutcomePolicy, WorkflowTrigger, parse_job_output_binding,
+        WorkflowJobOutcomePolicy, WorkflowRunArtifactSelection, WorkflowTrigger,
+        parse_job_output_binding,
     },
     scheduler,
     schema_diff::{WorkflowSchemaDiff, workflow_schema_report},
@@ -369,6 +370,8 @@ struct ManualTriggerForm {
     csrf_token: String,
     branch: Option<String>,
     commit: Option<String>,
+    #[serde(flatten)]
+    artifact_selections: BTreeMap<String, String>,
 }
 
 async fn users_page(
@@ -725,12 +728,14 @@ async fn workflow_detail_page(
     let repo_field = workflow_view::fixed_repo_field(&workflow, &repo);
     let schema_report = workflow_schema_report(&state, &workflow).map_err(internal_error)?;
     let form = workflow_form_view(Some(&workflow), &runner_catalog, repo_field);
+    let manual_artifacts = manual_artifact_fields(&state, &workflow)?;
     Ok(workflow_view::workflow_detail_page(
         &workflow,
         &repo,
         schema_report,
         form,
         &csrf,
+        manual_artifacts,
     ))
 }
 
@@ -835,14 +840,29 @@ async fn run_workflow(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("HEAD");
-    let pipeline_id = scheduler::enqueue_workflow_run(
+    let artifact_selections =
+        validate_manual_artifact_selections(&state, &workflow, &form.artifact_selections)?;
+    let pipeline_id = scheduler::enqueue_workflow_run_with_artifacts(
         Arc::clone(&state),
         &workflow,
         "manual",
         Some(&branch),
         Some(commit),
+        &artifact_selections,
     )
     .map_err(internal_error)?;
+    record_audit_event(
+        &state,
+        &user,
+        "workflow.run",
+        "pipeline",
+        Some(&pipeline_id),
+        Some(&workflow.name),
+        json!({
+            "workflow_id": workflow.id,
+            "artifact_selections": artifact_selections,
+        }),
+    )?;
     Ok(Redirect::to(&format!("/pipelines/{pipeline_id}")))
 }
 
@@ -923,12 +943,17 @@ async fn rerun_pipeline(
             .get_workflow_by_version_id(&pipeline.workflow_version_id)
             .map_err(internal_error)?
             .ok_or_else(|| not_found("workflow"))?;
-        let new_pipeline_id = scheduler::enqueue_workflow_run(
+        let original_selections = state
+            .db
+            .workflow_run_artifact_selections(&pipeline.id)
+            .map_err(internal_error)?;
+        let new_pipeline_id = scheduler::enqueue_workflow_run_with_artifacts(
             Arc::clone(&state),
             &workflow,
             "rerun",
             pipeline.trigger_ref.as_deref(),
             pipeline.commit_sha.as_deref(),
+            &original_selections,
         )
         .map_err(internal_error)?;
         Ok(Redirect::to(&format!("/pipelines/{new_pipeline_id}")))
@@ -1420,6 +1445,7 @@ fn parse_workflow_form(
     let jobs = parse_workflow_form_jobs(&form.jobs_json)?;
     let definition = WorkflowDefinition { jobs };
     definition.validate()?;
+    validate_promoted_artifact_trigger(trigger_kind, &definition)?;
     let job_schemas = validate_workflow_runners(state, &definition)?;
     Ok(ParsedWorkflow {
         trigger_json: serde_json::to_string(&trigger).map_err(|error| error.to_string())?,
@@ -1470,6 +1496,7 @@ fn parse_api_workflow_request(
         .collect::<Vec<_>>();
     let definition = WorkflowDefinition { jobs };
     definition.validate()?;
+    validate_promoted_artifact_trigger(trigger_kind, &definition)?;
     let job_schemas = validate_workflow_runners(state, &definition)?;
     Ok(ParsedWorkflow {
         trigger_json: serde_json::to_string(&trigger).map_err(|error| error.to_string())?,
@@ -1559,6 +1586,54 @@ fn validate_workflow_runners(
                     if expected_kind != "artifact" {
                         return Err(format!(
                             "workflow input {input_name} expects {expected_kind} but source binding is artifact"
+                        ));
+                    }
+                    continue;
+                }
+                WorkflowInputBinding::PromotedArtifact {
+                    source_runner_id,
+                    source_job_name,
+                    output_name,
+                } => {
+                    if expected_kind != "artifact" {
+                        return Err(format!(
+                            "workflow input {input_name} expects {expected_kind} but promoted binding is artifact"
+                        ));
+                    }
+                    let source_runner = state
+                        .db
+                        .get_runner(source_runner_id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| {
+                            format!(
+                                "promoted artifact references unknown runner {source_runner_id}"
+                            )
+                        })?;
+                    let source_job = state
+                        .db
+                        .list_runner_jobs(source_runner_id)
+                        .map_err(|error| error.to_string())?
+                        .into_iter()
+                        .find(|candidate| candidate.name == *source_job_name)
+                        .ok_or_else(|| {
+                            format!(
+                                "runner {} does not advertise artifact source job {}",
+                                source_runner.name, source_job_name
+                            )
+                        })?;
+                    let source_output = source_job.outputs.get(output_name).ok_or_else(|| {
+                        format!(
+                            "runner {} job {} does not advertise output {}",
+                            source_runner.name, source_job_name, output_name
+                        )
+                    })?;
+                    if source_output.kind.as_str() != "artifact" {
+                        return Err(format!(
+                            "promoted source {} / {} / {} is {} instead of artifact",
+                            source_runner.name,
+                            source_job_name,
+                            output_name,
+                            source_output.kind.as_str()
                         ));
                     }
                     continue;
@@ -1661,8 +1736,24 @@ fn workflow_input_binding_is_empty(binding: &WorkflowInputBinding) -> bool {
         WorkflowInputBinding::JobOutput { output_name, .. } => output_name.trim().is_empty(),
         WorkflowInputBinding::Commit
         | WorkflowInputBinding::Branch
-        | WorkflowInputBinding::SourceArtifact => false,
+        | WorkflowInputBinding::SourceArtifact
+        | WorkflowInputBinding::PromotedArtifact { .. } => false,
     }
+}
+
+fn validate_promoted_artifact_trigger(
+    trigger_kind: &str,
+    definition: &WorkflowDefinition,
+) -> Result<(), String> {
+    let has_promoted_binding = definition.jobs.iter().any(|job| {
+        job.inputs
+            .values()
+            .any(|binding| matches!(binding, WorkflowInputBinding::PromotedArtifact { .. }))
+    });
+    if has_promoted_binding && trigger_kind != "manual" {
+        return Err("artifact selected at run time requires a manual workflow trigger".to_string());
+    }
+    Ok(())
 }
 
 fn validate_literal_input_constraints(
@@ -2010,15 +2101,177 @@ fn workflow_cards_for_repos(
                 });
             let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)
                 .unwrap_or(WorkflowDefinition { jobs: Vec::new() });
+            let manual_artifacts = manual_artifact_fields(state, &workflow)?;
             Ok(workflow_view::WorkflowCard {
                 workflow,
                 repo,
                 schema_report,
                 trigger,
                 job_count: definition.jobs.len(),
+                manual_artifacts,
             })
         })
         .collect::<Result<Vec<_>, Response>>()
+}
+
+#[derive(Clone)]
+struct ManualArtifactRequirement {
+    job_index: usize,
+    input_name: String,
+    source_runner_id: String,
+    source_job_name: String,
+    output_name: String,
+}
+
+fn manual_artifact_requirements(
+    workflow: &Workflow,
+) -> Result<Vec<ManualArtifactRequirement>, Response> {
+    let definition: WorkflowDefinition =
+        serde_json::from_str(&workflow.definition_json).map_err(internal_error_text)?;
+    let mut requirements = Vec::new();
+    for (job_index, job) in definition.jobs.iter().enumerate() {
+        for (input_name, binding) in &job.inputs {
+            if let WorkflowInputBinding::PromotedArtifact {
+                source_runner_id,
+                source_job_name,
+                output_name,
+            } = binding
+            {
+                requirements.push(ManualArtifactRequirement {
+                    job_index,
+                    input_name: input_name.clone(),
+                    source_runner_id: source_runner_id.clone(),
+                    source_job_name: source_job_name.clone(),
+                    output_name: output_name.clone(),
+                });
+            }
+        }
+    }
+    Ok(requirements)
+}
+
+fn manual_artifact_field_name(requirement: &ManualArtifactRequirement) -> String {
+    format!(
+        "artifact:{}:{}",
+        requirement.job_index, requirement.input_name
+    )
+}
+
+fn manual_artifact_fields(
+    state: &Arc<AppState>,
+    workflow: &Workflow,
+) -> Result<Vec<workflow_view::ManualArtifactField>, Response> {
+    manual_artifact_requirements(workflow)?
+        .into_iter()
+        .map(|requirement| {
+            let source_runner = state
+                .db
+                .get_runner(&requirement.source_runner_id)
+                .map_err(internal_error)?;
+            let source_label = format!(
+                "{} / {} / {}",
+                source_runner
+                    .as_ref()
+                    .map(|runner| runner.name.as_str())
+                    .unwrap_or(requirement.source_runner_id.as_str()),
+                requirement.source_job_name,
+                requirement.output_name
+            );
+            let artifacts = state
+                .db
+                .list_recent_promotable_artifacts(
+                    &workflow.repo_id,
+                    &requirement.source_runner_id,
+                    &requirement.source_job_name,
+                    &requirement.output_name,
+                    10,
+                )
+                .map_err(internal_error)?;
+            let options = artifacts
+                .into_iter()
+                .map(|artifact| {
+                    let label = promotable_artifact_label(&artifact);
+                    workflow_view::ManualArtifactOption {
+                        value: artifact.server_artifact_id,
+                        label,
+                    }
+                })
+                .collect();
+            Ok(workflow_view::ManualArtifactField {
+                field_name: manual_artifact_field_name(&requirement),
+                label: format!(
+                    "Artifact for job-{}.{}",
+                    requirement.job_index + 1,
+                    requirement.input_name
+                ),
+                source_label,
+                options,
+            })
+        })
+        .collect()
+}
+
+fn promotable_artifact_label(artifact: &models::PromotableArtifact) -> String {
+    let revision = artifact
+        .commit_sha
+        .as_deref()
+        .map(|commit| commit.chars().take(12).collect::<String>())
+        .unwrap_or_else(|| "unknown commit".to_string());
+    let branch = artifact.trigger_ref.as_deref().unwrap_or("unknown ref");
+    let digest = artifact.sha256.chars().take(12).collect::<String>();
+    format!(
+        "{} @ {} · {} · {} · {} bytes · sha256:{}",
+        revision, branch, artifact.workflow_name, artifact.created_at, artifact.size_bytes, digest
+    )
+}
+
+fn validate_manual_artifact_selections(
+    state: &Arc<AppState>,
+    workflow: &Workflow,
+    submitted: &BTreeMap<String, String>,
+) -> Result<Vec<WorkflowRunArtifactSelection>, Response> {
+    let mut selections = Vec::new();
+    for requirement in manual_artifact_requirements(workflow)? {
+        let field_name = manual_artifact_field_name(&requirement);
+        let selected_id = submitted
+            .get(&field_name)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                bad_request(format!(
+                    "select an artifact for job-{}.{}",
+                    requirement.job_index + 1,
+                    requirement.input_name
+                ))
+            })?;
+        let eligible = state
+            .db
+            .list_recent_promotable_artifacts(
+                &workflow.repo_id,
+                &requirement.source_runner_id,
+                &requirement.source_job_name,
+                &requirement.output_name,
+                10,
+            )
+            .map_err(internal_error)?;
+        if !eligible
+            .iter()
+            .any(|artifact| artifact.server_artifact_id == selected_id)
+        {
+            return Err(bad_request(format!(
+                "selected artifact for job-{}.{} is not among the 10 newest eligible artifacts",
+                requirement.job_index + 1,
+                requirement.input_name
+            )));
+        }
+        selections.push(WorkflowRunArtifactSelection {
+            job_index: requirement.job_index,
+            input_name: requirement.input_name,
+            server_artifact_id: selected_id.to_string(),
+        });
+    }
+    Ok(selections)
 }
 
 fn render_create_workflow_form_error(
@@ -2065,12 +2318,14 @@ fn render_update_workflow_form_error(
         let schema_report = workflow_schema_report(state, workflow).map_err(internal_error)?;
         let form_view =
             workflow_form_view_from_submission(form, &runner_catalog, repo_field, true, error);
+        let manual_artifacts = manual_artifact_fields(state, workflow)?;
         Ok::<_, Response>(workflow_view::workflow_detail_page(
             workflow,
             &repo,
             schema_report,
             form_view,
             &csrf_token(state, user),
+            manual_artifacts,
         ))
     })();
     match result {

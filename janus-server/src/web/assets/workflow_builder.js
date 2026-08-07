@@ -67,6 +67,7 @@ import {
       row,
       derivedJobs: currentDerivedJobs(),
       getJobDefinition,
+      catalog,
       templates,
       onBindingChanged: syncJobsJson
     });
