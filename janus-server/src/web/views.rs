@@ -1,3 +1,4 @@
+pub(super) mod artifact;
 mod components;
 pub(super) mod pipeline;
 pub(super) mod repo;

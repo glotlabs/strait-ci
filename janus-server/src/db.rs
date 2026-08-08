@@ -12,9 +12,9 @@ use uuid::Uuid;
 use crate::models::AuditEvent;
 use crate::models::{
     JobRun, JobRunDetail, JobRunOutput, PipelineRun, PipelineSnapshot, PreviousJobSummary,
-    PromotableArtifact, PushEvent, PushEventRef, Repo, Runner, RunnerJobDefinition,
-    RunnerJobInputDefinition, RunnerJobOutputDefinition, ServerArtifact, User, UserRole, Workflow,
-    WorkflowJobOutcomePolicy, WorkflowRunArtifactSelection,
+    ProducedArtifact, PromotableArtifact, PushEvent, PushEventRef, Repo, Runner,
+    RunnerJobDefinition, RunnerJobInputDefinition, RunnerJobOutputDefinition, ServerArtifact, User,
+    UserRole, Workflow, WorkflowJobOutcomePolicy, WorkflowRunArtifactSelection,
 };
 use crate::state_machine::{self, JobStatus};
 use janus_lib::{Concurrency, InputType, JobOutputMetadata, OutputType};
@@ -32,6 +32,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 2,
         sql: include_str!("migrations/0002_workflow_run_artifact_inputs.sql"),
+    },
+    Migration {
+        version: 3,
+        sql: include_str!("migrations/0003_artifact_listing_indexes.sql"),
     },
 ];
 
@@ -1706,6 +1710,50 @@ impl Database {
                 })
             },
         ).optional()?)
+    }
+
+    pub fn list_recent_produced_artifacts(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ProducedArtifact>, Box<dyn std::error::Error>> {
+        let limit = i64::try_from(limit.min(500))?;
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT sa.id, sa.artifact_name, sa.sha256, sa.size_bytes, sa.created_at,
+                    repo.id, repo.name, w.name, p.id, jr.id, r.name,
+                    jr.runner_job_name, p.commit_sha, p.trigger_ref
+             FROM server_artifacts sa
+             JOIN job_run_artifacts jra ON jra.server_artifact_id = sa.id
+             JOIN job_runs jr ON jr.id = jra.job_run_id
+             JOIN pipeline_runs p ON p.id = jr.pipeline_run_id
+             JOIN repos repo ON repo.id = p.repo_id
+             JOIN workflows w ON w.id = p.workflow_id
+             JOIN runners r ON r.id = jr.runner_id
+             WHERE sa.scope_type = 'job_output'
+               AND jra.artifact_role = 'output'
+               AND jra.output_type = 'artifact'
+             ORDER BY sa.created_at DESC, sa.id DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit], |row| {
+            Ok(ProducedArtifact {
+                id: row.get(0)?,
+                artifact_name: row.get(1)?,
+                sha256: row.get(2)?,
+                size_bytes: row.get(3)?,
+                created_at: row.get(4)?,
+                repo_id: row.get(5)?,
+                repo_name: row.get(6)?,
+                workflow_name: row.get(7)?,
+                pipeline_run_id: row.get(8)?,
+                job_run_id: row.get(9)?,
+                runner_name: row.get(10)?,
+                runner_job_name: row.get(11)?,
+                commit_sha: row.get(12)?,
+                trigger_ref: row.get(13)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn list_recent_promotable_artifacts(

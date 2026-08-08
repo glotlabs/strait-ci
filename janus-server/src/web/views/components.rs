@@ -23,6 +23,7 @@ pub(super) fn layout(title: &str, body: Markup) -> Markup {
                             a href="/runners" { "Runners" }
                             a href="/workflows" { "Workflows" }
                             a href="/pipelines" { "Pipelines" }
+                            a href="/artifacts" { "Artifacts" }
                             a href="/users" { "Users" }
                         }
                         form method="post" action="/logout" {

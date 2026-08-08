@@ -347,3 +347,21 @@ pub struct ServerArtifact {
     pub storage_path: String,
     pub created_at: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProducedArtifact {
+    pub id: String,
+    pub artifact_name: String,
+    pub sha256: String,
+    pub size_bytes: i64,
+    pub created_at: String,
+    pub repo_id: String,
+    pub repo_name: String,
+    pub workflow_name: String,
+    pub pipeline_run_id: String,
+    pub job_run_id: String,
+    pub runner_name: String,
+    pub runner_job_name: String,
+    pub commit_sha: Option<String>,
+    pub trigger_ref: Option<String>,
+}

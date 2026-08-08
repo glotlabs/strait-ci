@@ -46,6 +46,7 @@ const CONTENT_SECURITY_POLICY_VALUE: &str = concat!(
     "form-action 'self'"
 );
 const PERMISSIONS_POLICY: HeaderName = HeaderName::from_static("permissions-policy");
+const ARTIFACT_PAGE_LIMIT: usize = 100;
 
 use crate::{
     app::AppState,
@@ -66,8 +67,8 @@ use crate::{
 };
 
 use super::views::{
-    pipeline as pipeline_view, repo as repo_view, runner as runner_view, user as user_view,
-    workflow as workflow_view,
+    artifact as artifact_view, pipeline as pipeline_view, repo as repo_view, runner as runner_view,
+    user as user_view, workflow as workflow_view,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -126,6 +127,7 @@ pub(crate) fn build_router(state: Arc<AppState>) -> Router {
             "/pipelines/{pipeline_id}/cancel",
             post(cancel_pipeline_route),
         )
+        .route("/artifacts", get(artifacts_page))
         .route("/artifacts/{artifact_id}", get(download_artifact))
         .route("/api/me", get(api_me))
         .route("/api/repos", get(api_list_repos).post(api_create_repo))
@@ -884,6 +886,18 @@ async fn pipelines_page(
         })
         .collect::<Vec<_>>();
     Ok(pipeline_view::pipelines_page(visible_pipelines))
+}
+
+async fn artifacts_page(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+) -> Result<Markup, Response> {
+    require_admin(&user)?;
+    let artifacts = state
+        .db
+        .list_recent_produced_artifacts(ARTIFACT_PAGE_LIMIT)
+        .map_err(internal_error)?;
+    Ok(artifact_view::artifacts_page(&artifacts))
 }
 
 async fn pipeline_detail(

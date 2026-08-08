@@ -479,6 +479,35 @@ thead th {
     text-align: right
 }
 
+.empty-state {
+    padding: 2rem 1rem;
+    text-align: center
+}
+
+.empty-state h3 {
+    margin-bottom: .35rem
+}
+
+.artifact-detail {
+    margin-top: .25rem;
+    font-size: .82rem
+}
+
+.artifact-digest,
+.nowrap {
+    white-space: nowrap
+}
+
+.download-link {
+    display: inline-flex;
+    padding: .62rem .85rem;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 700;
+    text-decoration: none
+}
+
 .job-builder-row {
     position: relative;
     display: grid;

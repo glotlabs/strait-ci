@@ -974,6 +974,110 @@ async fn artifact_download_uses_attachment_headers_and_safe_filename() {
 }
 
 #[tokio::test]
+async fn artifacts_page_lists_recent_job_outputs_with_download_links() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "artifact-list");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    let workflow = fixture
+        .state
+        .db
+        .workflows_for_repo(&repo.id)
+        .expect("workflows")
+        .into_iter()
+        .next()
+        .expect("workflow");
+    let pipeline_id = scheduler::enqueue_workflow_run(
+        Arc::clone(&fixture.state),
+        &workflow,
+        "manual",
+        Some("refs/heads/main"),
+        Some("abc123"),
+    )
+    .expect("pipeline");
+    let job_id = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline_id)
+        .expect("snapshot")
+        .expect("pipeline")
+        .jobs[0]
+        .run
+        .id
+        .clone();
+    let pending = fixture
+        .state
+        .artifacts
+        .store_bytes("job_output", &job_id, "release.tar.gz", b"release")
+        .expect("artifact");
+    let artifact_id = fixture
+        .state
+        .db
+        .insert_server_artifact(&pending)
+        .expect("artifact record");
+    fixture
+        .state
+        .db
+        .finish_job_run(
+            &job_id,
+            "success",
+            Some(10),
+            Some(0),
+            None,
+            None,
+            &JobOutputMetadata::default(),
+            "",
+            "",
+            &[JobRunOutput {
+                output_name: "release.tar.gz".to_string(),
+                kind: "artifact".to_string(),
+                runner_artifact_id: Some("runner-artifact".to_string()),
+                server_artifact_id: Some(artifact_id.clone()),
+                value: None,
+                sha256: Some(pending.sha256.clone()),
+                size_bytes: Some(pending.size_bytes),
+            }],
+        )
+        .expect("finish job");
+    let source = fixture
+        .state
+        .artifacts
+        .store_bytes("pipeline_source", &pipeline_id, "source.tar.gz", b"source")
+        .expect("source artifact");
+    fixture
+        .state
+        .db
+        .insert_server_artifact(&source)
+        .expect("source artifact record");
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/artifacts")
+                .header(
+                    "cookie",
+                    session_cookie_value(&fixture.state, &fixture.user.id),
+                )
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let html = String::from_utf8(body.to_vec()).expect("html");
+    assert!(html.contains("Latest artifacts"));
+    assert!(html.contains("release.tar.gz"));
+    assert!(html.contains("artifact-list"));
+    assert!(html.contains(&format!("href=\"/artifacts/{artifact_id}\"")));
+    assert!(html.contains(&format!("href=\"/pipelines/{pipeline_id}\"")));
+    assert!(!html.contains("source.tar.gz"));
+}
+
+#[tokio::test]
 async fn scheduler_tasks_stop_on_shutdown_signal() {
     let fixture = test_fixture().await;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
