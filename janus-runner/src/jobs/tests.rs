@@ -1475,7 +1475,7 @@ async fn job_process_sees_only_deliberate_environment() {
         .expect("stdout log");
     assert!(stdout.contains("JANUS_JOB_NAME=build-app"));
     assert!(stdout.contains("INPUT_COMMIT=abc123"));
-    assert!(stdout.contains("PATH=/usr/local/bin:/usr/bin:/bin"));
+    assert!(stdout.contains("PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"));
     assert!(!stdout.contains("HOME="));
 }
 

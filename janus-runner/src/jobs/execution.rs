@@ -30,7 +30,7 @@ use super::{
     store::now_rfc3339,
 };
 
-const DEFAULT_JOB_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+const DEFAULT_JOB_PATH: &str = "/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin";
 
 impl JobStore {
     pub(super) async fn run_job(self: Arc<Self>, execution: JobExecution) {
