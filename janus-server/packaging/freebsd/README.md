@@ -25,7 +25,7 @@ SKIP_BUILD=1 JANUS_SERVER_BIN=/path/to/janus-server janus-server/packaging/freeb
 Install the generated package:
 
 ```sh
-pkg install target/freebsd-pkg/packages/janus-server-0.2.0.pkg
+pkg install target/freebsd-pkg/packages/janus-server-0.3.0.pkg
 ```
 
 After install, edit the config and initialize runner signing keys. The package
