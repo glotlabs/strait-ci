@@ -25,7 +25,7 @@ SKIP_BUILD=1 JANUS_RUNNER_BIN=/path/to/janus-runner janus-runner/packaging/freeb
 Install the generated package:
 
 ```sh
-pkg install target/freebsd-runner-pkg/packages/janus-runner-0.3.0.pkg
+pkg install target/freebsd-runner-pkg/packages/janus-runner-0.4.0.pkg
 ```
 
 After install, `/opt/janus-runner/etc/runner.toml` is created from

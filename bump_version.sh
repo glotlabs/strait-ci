@@ -4,18 +4,13 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 usage() {
-    echo "Usage: $0 <version>" >&2
+    echo "Usage: $0 [version]" >&2
+    echo "With no version, increments the minor version and resets the patch version." >&2
     echo "Example: $0 0.3.0" >&2
     exit 2
 }
 
-[ "$#" -eq 1 ] || usage
-NEW_VERSION=$1
-
-if ! printf '%s\n' "${NEW_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
-    echo "Invalid semantic version: ${NEW_VERSION}" >&2
-    exit 2
-fi
+[ "$#" -le 1 ] || usage
 
 package_version() {
     awk '
@@ -36,6 +31,17 @@ OLD_VERSION=$(package_version "${ROOT_DIR}/janus-lib/Cargo.toml")
     echo "Could not read the current Janus version" >&2
     exit 1
 }
+
+if [ "$#" -eq 1 ]; then
+    NEW_VERSION=$1
+else
+    NEW_VERSION=$(printf '%s\n' "${OLD_VERSION}" | awk -F. '{ print $1 "." ($2 + 1) ".0" }')
+fi
+
+if ! printf '%s\n' "${NEW_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+    echo "Invalid semantic version: ${NEW_VERSION}" >&2
+    exit 2
+fi
 
 for manifest in \
     "${ROOT_DIR}/janus-lib/Cargo.toml" \
