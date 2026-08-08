@@ -301,6 +301,9 @@ The runner executes each script with a minimal environment.
 - `JANUS_METADATA_PATH`
 - `PATH`
 
+`PATH` preserves the entries configured for the `janus-runner` service, then
+appends any missing standard system paths used by jobs.
+
 ### Declared inputs
 
 For each manifest input, the runner exports:

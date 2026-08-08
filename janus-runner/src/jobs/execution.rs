@@ -1,5 +1,7 @@
 use std::{
     collections::BTreeMap,
+    env,
+    ffi::{OsStr, OsString},
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
@@ -32,6 +34,22 @@ use super::{
 
 const DEFAULT_JOB_PATH: &str = "/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin";
 
+fn merged_job_path(inherited: Option<&OsStr>) -> OsString {
+    let mut paths = inherited
+        .map(env::split_paths)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    for path in env::split_paths(OsStr::new(DEFAULT_JOB_PATH)) {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+
+    env::join_paths(paths).unwrap_or_else(|_| OsString::from(DEFAULT_JOB_PATH))
+}
+
 impl JobStore {
     pub(super) async fn run_job(self: Arc<Self>, execution: JobExecution) {
         info!(
@@ -55,7 +73,7 @@ impl JobStore {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_process_group(&mut command);
-        command.env("PATH", DEFAULT_JOB_PATH);
+        command.env("PATH", merged_job_path(env::var_os("PATH").as_deref()));
 
         for (key, value) in build_job_env(execution) {
             command.env(key, value);
@@ -768,4 +786,28 @@ fn append_runtime_message(path: &Path, message: &str) -> Result<(), JobError> {
         path: path.display().to_string(),
         source,
     })
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn operator_path_precedes_defaults_without_duplicate_entries() {
+        let inherited = env::join_paths(["/operator/bin", "/usr/bin"]).expect("valid PATH");
+        let merged = merged_job_path(Some(&inherited));
+        let paths = env::split_paths(&merged).collect::<Vec<_>>();
+
+        assert_eq!(paths.first(), Some(&PathBuf::from("/operator/bin")));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| path.as_os_str() == "/usr/bin")
+                .count(),
+            1
+        );
+        for default in env::split_paths(OsStr::new(DEFAULT_JOB_PATH)) {
+            assert!(paths.contains(&default));
+        }
+    }
 }

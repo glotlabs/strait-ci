@@ -1475,7 +1475,21 @@ async fn job_process_sees_only_deliberate_environment() {
         .expect("stdout log");
     assert!(stdout.contains("JANUS_JOB_NAME=build-app"));
     assert!(stdout.contains("INPUT_COMMIT=abc123"));
-    assert!(stdout.contains("PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"));
+    let path = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("PATH="))
+        .expect("PATH should be present");
+    let path_entries = std::env::split_paths(path).collect::<Vec<_>>();
+    for expected in [
+        "/sbin",
+        "/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/usr/local/sbin",
+        "/usr/local/bin",
+    ] {
+        assert!(path_entries.contains(&PathBuf::from(expected)));
+    }
     assert!(!stdout.contains("HOME="));
 }
 
