@@ -112,6 +112,7 @@ pub(crate) fn build_router(state: Arc<AppState>) -> Router {
         .route("/repos", get(repos_page).post(create_repo))
         .route("/repos/{repo_id}/trigger", post(trigger_repo))
         .route("/runners", get(runners_page).post(create_runner))
+        .route("/runners/{runner_id}", get(runner_detail_page))
         .route("/runners/{runner_id}/update", post(update_runner))
         .route("/runners/{runner_id}/toggle", post(toggle_runner))
         .route("/runners/{runner_id}/test", post(test_runner))
@@ -349,6 +350,7 @@ struct CreateRunnerForm {
 struct UpdateRunnerForm {
     csrf_token: String,
     name: String,
+    base_url: String,
 }
 #[derive(Deserialize)]
 struct WorkflowForm {
@@ -578,18 +580,8 @@ async fn runners_page(
 ) -> Result<Markup, Response> {
     let runners = state.db.list_runners().map_err(internal_error)?;
     let csrf = csrf_token(&state, &user);
-    let runners_with_jobs = runners
-        .into_iter()
-        .map(|runner| {
-            let jobs = state
-                .db
-                .list_runner_jobs(&runner.id)
-                .map_err(internal_error)?;
-            Ok((runner, jobs))
-        })
-        .collect::<Result<Vec<_>, Response>>()?;
     Ok(runner_view::runners_page(
-        runners_with_jobs,
+        runners,
         runner_auth_view(&state),
         &csrf,
         None,
@@ -627,6 +619,30 @@ async fn create_runner(
     Ok(Redirect::to("/runners"))
 }
 
+async fn runner_detail_page(
+    _: AdminUser,
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+    AxumPath(runner_id): AxumPath<String>,
+) -> Result<Markup, Response> {
+    let runner = state
+        .db
+        .get_runner(&runner_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("runner"))?;
+    let jobs = state
+        .db
+        .list_runner_jobs(&runner.id)
+        .map_err(internal_error)?;
+    Ok(runner_view::runner_detail_page(
+        &runner,
+        &jobs,
+        &csrf_token(&state, &user),
+        None,
+        runner_view::RunnerEditFormView::from_runner(&runner),
+    ))
+}
+
 async fn toggle_runner(
     _: AdminUser,
     CurrentUser(user): CurrentUser,
@@ -653,7 +669,7 @@ async fn toggle_runner(
         Some(&runner.name),
         json!({ "field": "enabled", "old": runner.enabled, "new": !runner.enabled }),
     )?;
-    Ok(Redirect::to("/runners"))
+    Ok(Redirect::to(&format!("/runners/{}", runner.id)))
 }
 
 async fn update_runner(
@@ -664,15 +680,18 @@ async fn update_runner(
     Form(form): Form<UpdateRunnerForm>,
 ) -> Result<Redirect, Response> {
     verify_csrf(&state, &user, &form.csrf_token)?;
-    validate_runner_name(&form.name).map_err(bad_request)?;
-    state
+    let runner = state
         .db
         .get_runner(&runner_id)
         .map_err(internal_error)?
         .ok_or_else(|| not_found("runner"))?;
+    validate_runner_name(&form.name)
+        .map_err(|error| render_runner_detail_form_error(&state, &user, &runner, &form, error))?;
+    validate_base_url(&form.base_url, &state.config.runner_url_policy)
+        .map_err(|error| render_runner_detail_form_error(&state, &user, &runner, &form, error))?;
     state
         .db
-        .update_runner_name(&runner_id, form.name.trim())
+        .update_runner(&runner_id, form.name.trim(), form.base_url.trim())
         .map_err(internal_error)?;
     record_audit_event(
         &state,
@@ -681,9 +700,12 @@ async fn update_runner(
         "runner",
         Some(&runner_id),
         Some(form.name.trim()),
-        json!({ "field": "name" }),
+        json!({
+            "old": { "name": runner.name, "base_url": runner.base_url },
+            "new": { "name": form.name.trim(), "base_url": form.base_url.trim() },
+        }),
     )?;
-    Ok(Redirect::to("/runners"))
+    Ok(Redirect::to(&format!("/runners/{runner_id}")))
 }
 
 async fn test_runner(
@@ -697,7 +719,7 @@ async fn test_runner(
     refresh_single_runner(&state, &runner_id)
         .await
         .map_err(internal_error_text)?;
-    Ok(Redirect::to("/runners"))
+    Ok(Redirect::to(&format!("/runners/{runner_id}")))
 }
 
 async fn workflows_page(
@@ -2076,9 +2098,9 @@ fn render_runners_form_error(
     error: String,
 ) -> Response {
     let result = (|| {
-        let runners_with_jobs = runners_with_jobs(state)?;
+        let runners = state.db.list_runners().map_err(internal_error)?;
         Ok::<_, Response>(runner_view::runners_page(
-            runners_with_jobs,
+            runners,
             runner_auth_view(state),
             &csrf_token(state, user),
             Some(&error),
@@ -2088,6 +2110,28 @@ fn render_runners_form_error(
     match result {
         Ok(markup) => html_bad_request(markup),
         Err(response) => response,
+    }
+}
+
+fn render_runner_detail_form_error(
+    state: &Arc<AppState>,
+    user: &User,
+    runner: &models::Runner,
+    form: &UpdateRunnerForm,
+    error: String,
+) -> Response {
+    match state.db.list_runner_jobs(&runner.id) {
+        Ok(jobs) => html_bad_request(runner_view::runner_detail_page(
+            runner,
+            &jobs,
+            &csrf_token(state, user),
+            Some(&error),
+            runner_view::RunnerEditFormView {
+                name: form.name.clone(),
+                base_url: form.base_url.clone(),
+            },
+        )),
+        Err(error) => internal_error(error),
     }
 }
 
@@ -2346,24 +2390,6 @@ fn render_update_workflow_form_error(
         Ok(markup) => html_bad_request(markup),
         Err(response) => response,
     }
-}
-
-fn runners_with_jobs(
-    state: &Arc<AppState>,
-) -> Result<Vec<(models::Runner, Vec<RunnerJobDefinition>)>, Response> {
-    state
-        .db
-        .list_runners()
-        .map_err(internal_error)?
-        .into_iter()
-        .map(|runner| {
-            let jobs = state
-                .db
-                .list_runner_jobs(&runner.id)
-                .map_err(internal_error)?;
-            Ok((runner, jobs))
-        })
-        .collect::<Result<Vec<_>, Response>>()
 }
 
 fn visible_repos_for_user(state: &Arc<AppState>, user: &User) -> Result<Vec<Repo>, Response> {

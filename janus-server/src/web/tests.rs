@@ -176,7 +176,7 @@ async fn workflows_page_renders_runner_job_builder() {
 }
 
 #[tokio::test]
-async fn runners_page_renders_name_edit_form() {
+async fn runners_page_links_to_clean_runner_detail() {
     let fixture = test_fixture().await;
     let admin = admin_user(&fixture.state);
     let cookie = session_cookie_value(&fixture.state, &admin.id);
@@ -197,20 +197,52 @@ async fn runners_page_renders_name_edit_form() {
         .await
         .expect("body");
     let html = String::from_utf8(body.to_vec()).expect("html");
-    assert!(html.contains(&format!("/runners/{}/update", fixture.runner_id)));
-    assert!(html.contains("Runner name"));
-    assert!(html.contains("Save name"));
+    assert!(html.contains(&format!("href=\"/runners/{}\"", fixture.runner_id)));
+    assert!(!html.contains(&format!("/runners/{}/update", fixture.runner_id)));
+    assert!(!html.contains("Refresh jobs"));
+    assert!(!html.contains("Disable runner"));
 }
 
 #[tokio::test]
-async fn runner_name_can_be_updated_from_frontend() {
+async fn runner_detail_renders_edit_form_and_controls() {
     let fixture = test_fixture().await;
+    let admin = admin_user(&fixture.state);
+    let cookie = session_cookie_value(&fixture.state, &admin.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get(format!("/runners/{}", fixture.runner_id))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let html = String::from_utf8(body.to_vec()).expect("html");
+    assert!(html.contains(&format!("/runners/{}/update", fixture.runner_id)));
+    assert!(html.contains("name=\"base_url\""));
+    assert!(html.contains("Save changes"));
+    assert!(html.contains("Refresh jobs"));
+    assert!(html.contains("Disable runner"));
+    assert!(html.contains("Advertised jobs"));
+}
+
+#[tokio::test]
+async fn runner_name_and_base_url_can_be_updated_from_detail_page() {
+    let fixture = test_fixture_with_runner("https://old-runner.example.com").await;
     let admin = admin_user(&fixture.state);
     let token = csrf_token(&fixture.state, &admin);
     let cookie = session_cookie_value(&fixture.state, &admin.id);
     let body = form_urlencoded::Serializer::new(String::new())
         .append_pair("csrf_token", &token)
         .append_pair("name", "renamed-runner")
+        .append_pair("base_url", "https://runner.example.com/")
         .finish();
 
     let response = fixture
@@ -226,6 +258,13 @@ async fn runner_name_can_be_updated_from_frontend() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("/runners/{}", fixture.runner_id).as_str())
+    );
 
     let runner = fixture
         .state
@@ -234,6 +273,82 @@ async fn runner_name_can_be_updated_from_frontend() {
         .expect("runner")
         .expect("runner");
     assert_eq!(runner.name, "renamed-runner");
+    assert_eq!(runner.base_url, "https://runner.example.com/");
+    assert_eq!(runner.last_health_state, "unknown");
+    assert!(runner.last_seen_at.is_none());
+    assert!(
+        fixture
+            .state
+            .db
+            .list_runner_jobs(&fixture.runner_id)
+            .expect("runner jobs")
+            .is_empty()
+    );
+
+    let events = fixture.state.db.list_audit_events().expect("audit events");
+    let event = events
+        .iter()
+        .rev()
+        .find(|event| event.action == "runner.update")
+        .expect("runner update audit event");
+    let metadata: JsonValue = serde_json::from_str(&event.metadata_json).expect("metadata");
+    assert_eq!(
+        metadata["old"]["base_url"],
+        json!("https://old-runner.example.com")
+    );
+    assert_eq!(
+        metadata["new"]["base_url"],
+        json!("https://runner.example.com/")
+    );
+}
+
+#[tokio::test]
+async fn invalid_runner_base_url_rerenders_detail_without_persisting() {
+    let fixture = test_fixture().await;
+    let original_runner = fixture
+        .state
+        .db
+        .get_runner(&fixture.runner_id)
+        .expect("runner")
+        .expect("runner");
+    let admin = admin_user(&fixture.state);
+    let token = csrf_token(&fixture.state, &admin);
+    let cookie = session_cookie_value(&fixture.state, &admin.id);
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf_token", &token)
+        .append_pair("name", "submitted-name")
+        .append_pair("base_url", "not a URL")
+        .finish();
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post(format!("/runners/{}/update", fixture.runner_id))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", cookie)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let html = String::from_utf8(body.to_vec()).expect("html");
+    assert!(html.contains("base_url must be a valid URL"));
+    assert!(html.contains("value=\"submitted-name\""));
+    assert!(html.contains("value=\"not a URL\""));
+
+    let runner = fixture
+        .state
+        .db
+        .get_runner(&fixture.runner_id)
+        .expect("runner")
+        .expect("runner");
+    assert_eq!(runner.name, original_runner.name);
+    assert_eq!(runner.base_url, original_runner.base_url);
 }
 
 #[tokio::test]
@@ -348,7 +463,7 @@ async fn manual_workflow_promotes_a_recent_build_artifact_to_another_runner() {
     fixture
         .state
         .db
-        .update_runner_name(&fixture.runner_id, "glot-build")
+        .update_runner(&fixture.runner_id, "glot-build", &mock.base_url)
         .expect("build runner name");
     let repo = create_repo_direct(&fixture.state, &fixture.user, "artifact-promotion");
     create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);

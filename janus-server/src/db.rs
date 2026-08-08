@@ -469,16 +469,33 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_runner_name(
+    pub fn update_runner(
         &self,
         runner_id: &str,
         name: &str,
+        base_url: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().expect("db mutex poisoned");
-        conn.execute(
-            "UPDATE runners SET name = ?2 WHERE id = ?1",
-            params![runner_id, name],
+        let mut conn = self.conn.lock().expect("db mutex poisoned");
+        let tx = conn.transaction()?;
+        let old_base_url: String = tx.query_row(
+            "SELECT base_url FROM runners WHERE id = ?1",
+            [runner_id],
+            |row| row.get(0),
         )?;
+        let base_url_changed = old_base_url != base_url;
+        tx.execute(
+            "UPDATE runners
+             SET name = ?2,
+                 base_url = ?3,
+                 last_health_state = CASE WHEN base_url <> ?3 THEN 'unknown' ELSE last_health_state END,
+                 last_seen_at = CASE WHEN base_url <> ?3 THEN NULL ELSE last_seen_at END
+             WHERE id = ?1",
+            params![runner_id, name, base_url],
+        )?;
+        if base_url_changed {
+            tx.execute("DELETE FROM runner_jobs WHERE runner_id = ?1", [runner_id])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
