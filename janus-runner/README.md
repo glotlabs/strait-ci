@@ -36,6 +36,7 @@ Important files:
 - [`janus-runner/Cargo.toml`](/Users/petter/dev/Projects/janus/janus-runner/Cargo.toml) - Rust package definition
 - [`janus-runner/runner.example.toml`](/Users/petter/dev/Projects/janus/janus-runner/runner.example.toml) - example runner config
 - [`janus-runner/manifests/build-app.example.toml`](/Users/petter/dev/Projects/janus/janus-runner/manifests/build-app.example.toml) - example job manifest
+- [`janus-runner/manifests/build-freebsd-packages.example.toml`](/Users/petter/dev/Projects/janus/janus-runner/manifests/build-freebsd-packages.example.toml) - FreeBSD package build manifest
 
 ## Quickstart
 
@@ -153,6 +154,23 @@ Make the script executable:
 
 ```bash
 chmod +x /opt/janus-runner/jobs/build-app.sh
+```
+
+### FreeBSD package build job
+
+`build-freebsd-packages.example.toml` accepts the generated repository source
+archive as its `source` input. On a FreeBSD runner with Rust and `pkg` installed,
+the job builds both workspace binaries, creates their native packages, and
+registers `janus-server.pkg` and `janus-runner.pkg` as output artifacts.
+
+Install the sample manifest and script from the `janus-runner` package with:
+
+```sh
+cp /opt/janus-runner/share/examples/janus-runner/build-freebsd-packages.toml.sample \
+  /opt/janus-runner/manifests/build-freebsd-packages.toml
+cp /opt/janus-runner/share/examples/janus-runner/build-freebsd-packages.sh.sample \
+  /opt/janus-runner/jobs/build-freebsd-packages.sh
+chmod 0755 /opt/janus-runner/jobs/build-freebsd-packages.sh
 ```
 
 ### 7. Run the server

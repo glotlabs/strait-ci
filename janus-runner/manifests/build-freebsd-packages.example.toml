@@ -1,0 +1,18 @@
+name = "build-freebsd-packages"
+script = "/opt/janus-runner/jobs/build-freebsd-packages.sh"
+timeout_seconds = 3600
+concurrency = "job_exclusive"
+
+[inputs.source]
+type = "artifact"
+required = true
+
+[outputs.janus-server]
+type = "artifact"
+path = "janus-server.pkg"
+required = true
+
+[outputs.janus-runner]
+type = "artifact"
+path = "janus-runner.pkg"
+required = true

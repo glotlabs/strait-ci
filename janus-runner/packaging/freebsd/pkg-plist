@@ -10,8 +10,10 @@ etc/runner.toml.sample
 @dir manifests
 @dir share/examples/janus-runner
 share/examples/janus-runner/build-app.sh.sample
+share/examples/janus-runner/build-freebsd-packages.sh.sample
 @mode 0644
 share/examples/janus-runner/build-app.toml.sample
+share/examples/janus-runner/build-freebsd-packages.toml.sample
 @mode 0750
 @dir var
 @dir run

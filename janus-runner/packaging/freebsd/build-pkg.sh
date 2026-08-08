@@ -37,6 +37,8 @@ install -m 0640 "${ROOT_DIR}/janus-runner/runner.example.toml" "${FAKE_ROOT}${PR
 install -m 0755 "${PKG_DIR}/files/janus_runner.rc" "${FAKE_ROOT}${PREFIX}/etc/rc.d/janus_runner"
 install -m 0644 "${ROOT_DIR}/janus-runner/manifests/build-app.example.toml" "${FAKE_ROOT}${PREFIX}/share/examples/janus-runner/build-app.toml.sample"
 install -m 0755 "${ROOT_DIR}/janus-runner/jobs/build-app.sh" "${FAKE_ROOT}${PREFIX}/share/examples/janus-runner/build-app.sh.sample"
+install -m 0644 "${ROOT_DIR}/janus-runner/manifests/build-freebsd-packages.example.toml" "${FAKE_ROOT}${PREFIX}/share/examples/janus-runner/build-freebsd-packages.toml.sample"
+install -m 0755 "${ROOT_DIR}/janus-runner/jobs/build-freebsd-packages.sh" "${FAKE_ROOT}${PREFIX}/share/examples/janus-runner/build-freebsd-packages.sh.sample"
 
 install -d -m 0755 "${METADATA_DIR}" "${OUT_DIR}"
 sed "s/^version:.*/version: \"${VERSION}\"/" "${PKG_DIR}/+MANIFEST" > "${METADATA_DIR}/+MANIFEST"
